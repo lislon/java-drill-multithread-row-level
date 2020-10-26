@@ -31,4 +31,4 @@ Please see `RowBlockerImpl`
 
 Classes in `ru.lislon.draft.*` were made for an attempt to compare perfomance between full-featured RowBlockerImpl with their simpler variations.
 
-Benchmark classes are draft and requires a lot of additional research.     
+Benchmark classes are still in draft state and requires a lot of additional research from my side.     
