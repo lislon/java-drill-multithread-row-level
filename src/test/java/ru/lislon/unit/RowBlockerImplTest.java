@@ -27,7 +27,7 @@ public class RowBlockerImplTest {
 
     HashMap<Integer, Integer> data = new HashMap<>();
     RowBlocker<Integer> r = new RowBlockerImpl<>();
-    ExecutorService pool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() / 2);
+    ExecutorService pool = Executors.newFixedThreadPool(8);
 
     @BeforeEach
     void setup() {
@@ -53,59 +53,46 @@ public class RowBlockerImplTest {
 
     @Test
     void parallelIncrements() throws Exception {
-        for (int i = 0; i < ROW_LOCKS_COUNT; i++) {
-            pool.submit(() -> {
-                int cacheId = ThreadLocalRandom.current().nextInt(CACHES_ENTRIES);
-                try {
-                    r.tryRowLock(cacheId, () -> slowPlusPlus(cacheId), TIMEOUT_NS);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            });
-        }
+        var rowLocksTasks = runInParallel(ROW_LOCKS_COUNT, () -> {
+            int cacheId = ThreadLocalRandom.current().nextInt(CACHES_ENTRIES);
+            try {
+                return r.tryRowLock(cacheId, () -> slowPlusPlus(cacheId), TIMEOUT_NS);
+            } catch (Exception e) {
+                e.printStackTrace();
+                return false;
+            }
+        });
 
-        pool.shutdown();
-        pool.awaitTermination(1, TimeUnit.DAYS);
-
+        assertShuffledTasksAreDone(rowLocksTasks, Stream.empty());
         assertSumDataWillBe(ROW_LOCKS_COUNT);
-    }
-
-    private void assertSumDataWillBe(int expected) {
-        int sum = data.values().stream().mapToInt(x -> x).sum();
-        assertEquals(expected, sum);
     }
 
     @Test
     void reentrantLocking() throws Exception {
-        ExecutorService s = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-        for (int i = 0; i < ROW_LOCKS_COUNT; i++) {
-            s.submit(() -> {
-                try {
-                    int cacheId = ThreadLocalRandom.current().nextInt(CACHES_ENTRIES);
-                    r.tryRowLock(cacheId, () -> {
-                        try {
-                            r.tryRowLock(cacheId, () -> {
-                                slowPlusPlus(cacheId);
-                            }, TIMEOUT_NS);
-                        } catch (Exception e) {
-                            e.printStackTrace();
-                        }
-                    }, TIMEOUT_NS);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
+        var rowLocksTasks = runInParallel(ROW_LOCKS_COUNT, () -> {
+            try {
+                int cacheId = ThreadLocalRandom.current().nextInt(CACHES_ENTRIES);
+                return r.tryRowLock(cacheId, () -> {
+                    try {
+                        r.tryRowLock(cacheId, () -> {
+                            slowPlusPlus(cacheId);
+                        }, TIMEOUT_NS);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }, TIMEOUT_NS);
+            } catch (Exception e) {
+                e.printStackTrace();
+                return false;
+            }
+        });
 
-            });
-        }
-
-        s.shutdown();
-        s.awaitTermination(1, TimeUnit.DAYS);
-
+        assertShuffledTasksAreDone(rowLocksTasks, Stream.empty());
         assertSumDataWillBe(ROW_LOCKS_COUNT);
     }
 
     @Test
-    void timoutLock() throws Exception {
+    void timeoutLock() throws Exception {
         ExecutorService s = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
         s.submit(() -> {
             try {
@@ -223,23 +210,18 @@ public class RowBlockerImplTest {
             int cacheId = ThreadLocalRandom.current().nextInt(CACHES_ENTRIES);
             return r.tryRowLock(cacheId, () -> {
                 slowPlusPlus(cacheId);
-                System.out.println("\t.");
             }, TIMEOUT_NS);
         });
 
         var globalLocksTasks = runInParallel(GLOBAL_LOCKS_COUNT, () -> {
             return r.tryGlobalLock(() -> {
-                System.out.println("[");
                 int cacheId = ThreadLocalRandom.current().nextInt(CACHES_ENTRIES);
                 try {
                     r.tryRowLock(cacheId, () -> {
                         slowPlusPlus(cacheId);
-                        System.out.println("\ti");
                     }, TIMEOUT_NS);
-                    System.out.println("]");
                 } catch (InterruptedException e) {
                     e.printStackTrace();
-                    return;
                 }
             }, TIMEOUT_NS);
         });
@@ -284,6 +266,11 @@ public class RowBlockerImplTest {
                         return false;
                     }
                 });
+    }
+
+    private void assertSumDataWillBe(int expected) {
+        int sum = data.values().stream().mapToInt(x -> x).sum();
+        assertEquals(expected, sum);
     }
 
 }
