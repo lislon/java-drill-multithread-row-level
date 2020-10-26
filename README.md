@@ -29,6 +29,6 @@ Implementation
 
 Please see `RowBlockerImpl`
 
-Classes in `ru.lislon.draft.*` was made for an attempt to compare perfomance between full-featured RowBlockerImpl with their simpler variations.
+Classes in `ru.lislon.draft.*` were made for an attempt to compare perfomance between full-featured RowBlockerImpl with their simpler variations.
 
 Benchmark classes are draft and requires a lot of additional research.     
