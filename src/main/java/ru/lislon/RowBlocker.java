@@ -5,5 +5,5 @@ public interface RowBlocker<T> {
 
     boolean tryGlobalLock(Runnable block, long timeoutNs) throws InterruptedException;
 
-    boolean isGlobalLocked();
+    boolean isGlobalLockActive();
 }

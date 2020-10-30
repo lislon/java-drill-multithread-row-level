@@ -45,7 +45,7 @@ public class ReadWriteLockSimpleImpl<T> implements RowBlocker<T> {
     }
 
     @Override
-    public boolean isGlobalLocked() {
+    public boolean isGlobalLockActive() {
         return false;
     }
 

@@ -1,14 +1,20 @@
 package ru.lislon;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 
 public class RowBlockerImpl<T> implements RowBlocker<T> {
+    private static final Logger logger = LoggerFactory.getLogger(RowBlockerImpl.class);
+
     /**
      * When amount of locks held by single thread exceed this threshold,
      * a global lock will be escalated for current thread.
@@ -31,13 +37,20 @@ public class RowBlockerImpl<T> implements RowBlocker<T> {
      * Count of row locks held by single thread.
      */
     private final ThreadLocal<Integer> lockDepth = new ThreadLocal<>();
+
+    /**
+     * First escalated thread will occupy this variable.
+     */
+    private final AtomicReference<Thread> escalatedThread = new AtomicReference<>(null);
+
     /**
      * Flag indicating that global lock is initiated.
      *
-     * true means that global lock is either:
+     * true means one of 2 states:
      *   - some thread took global lock and waits till row-level locks will finish their jobs
-     *   - some thread took global lock and execution is in process
-     *   - row-level blocks allowed only to release existing locks, but not take a new ones.
+     *   - some thread took global lock and executes block in critical section.
+     *
+     * When isGlobalLockStarted is true, already taken row-level blocks are allowed to proceed.
      */
     private volatile boolean isGlobalLockStarted = false;
 
@@ -67,6 +80,8 @@ public class RowBlockerImpl<T> implements RowBlocker<T> {
         while (deadLine - System.nanoTime() > 0) {
 
             LockType thisRowLockType;
+            boolean globalLockIsWaitForCurrentThreadToFinish = false;
+
             if (!this.isGlobalLockStarted) {
                 thisRowLockType = LockType.ROW;
             } else if (this.globalLock.isHeldByCurrentThread()) {
@@ -77,25 +92,35 @@ public class RowBlockerImpl<T> implements RowBlocker<T> {
             } else {
                 // When global lock is started, allow threads holding any row locks to finish their job
                 thisRowLockType = LockType.ROW;
+                globalLockIsWaitForCurrentThreadToFinish = true;
             }
 
             if (thisRowLockType == LockType.ROW) {
 
-                if (getLockDepth() > THRESHOLD_MAX_LOCKS_HELD_BY_THREAD) {
-                    return tryGlobalLock(block, deadLine - System.nanoTime());
+                if (getLockDepth() >= THRESHOLD_MAX_LOCKS_HELD_BY_THREAD) {
+                    if (escalatedThread.compareAndSet(null, Thread.currentThread())) {
+                        try {
+                            return tryGlobalLock(block, deadLine - System.nanoTime());
+                        } finally {
+                            escalatedThread.set(null);
+                        }
+                    }
                 }
 
                 ReentrantLock rowLock = rowLocks.computeIfAbsent(key, id -> new ReentrantLock());
 
                 if (rowLock.tryLock(deadLine - System.nanoTime(), TimeUnit.NANOSECONDS)) {
                     try {
-                        if (this.isGlobalLockStarted) {
+                        if (this.isGlobalLockStarted && !globalLockIsWaitForCurrentThreadToFinish) {
                             // looks like global lock has been called during taking our rowLock.
                             // Start over, as there might be global lock running
                             continue;
                         }
-                        // we are safe here, since we know that globalLock was false AFTER we took took our rowLock
-                        // So new globalLocks will wait till we unblock rowLock
+                        // we are safe here in 2 scenarios:
+                        //  1. We know that globalLock was false AFTER we took took our rowLock.
+                        //     So even if new globalLocks will be taken, they will wait till we unblock rowLock
+                        //  2. Some global lock is waiting to be acquired and we are already holding some rowLocks.
+                        //     So we should proceed to free them anyway
                         countDepthAndExecute(block);
                         return true;
                     } finally {
@@ -127,9 +152,12 @@ public class RowBlockerImpl<T> implements RowBlocker<T> {
 
         long deadLine = System.nanoTime() + timeoutNs;
 
+        logger.debug("tryLock global wait...");
         if (!globalLock.tryLock(timeoutNs, TimeUnit.NANOSECONDS)) {
+            logger.debug("tryLock global fail");
             return false;
         }
+        logger.debug("tryLock global succeeded");
 
         try {
             isGlobalLockStarted = true;
@@ -149,7 +177,7 @@ public class RowBlockerImpl<T> implements RowBlocker<T> {
     }
 
     @Override
-    public boolean isGlobalLocked() {
+    public boolean isGlobalLockActive() {
         return isGlobalLockStarted;
     }
 
@@ -172,8 +200,9 @@ public class RowBlockerImpl<T> implements RowBlocker<T> {
                     }
                 }
 
-                // Possible improvement: Implement custom WeakValueConcurrentHashMap for cleaning up of unused locks during non-global locks
-                //       (like guava's https://guava.dev/releases/18.0/api/docs/com/google/common/collect/MapMaker.html)
+                // Possible improvement: Implement custom WeakValueConcurrentHashMap for cleaning up of
+                // unused locks during non-global locks
+                // (like guava's https://guava.dev/releases/18.0/api/docs/com/google/common/collect/MapMaker.html)
                 it.remove();
             }
         }
